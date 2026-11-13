@@ -21,6 +21,8 @@ import wiki.liberty.domain.RevisionLookup
 import wiki.liberty.domain.RevisionMetadata
 import wiki.liberty.domain.RevisionPage
 import wiki.liberty.domain.RevisionSource
+import wiki.liberty.domain.UndoResult
+import wiki.liberty.domain.WikitextUndo
 import wiki.liberty.domain.WikitextDiff
 import wiki.liberty.domain.validUnicode
 import java.security.MessageDigest
@@ -40,7 +42,7 @@ data class PagePolicy(
 
 data class CreatePage(val title: String, val namespaceId: Int, val source: String, val summary: String)
 data class EditPage(val lookup: PageLookup, val base: RevisionBase, val source: String, val summary: String)
-data class UndoPage(val lookup: PageLookup, val target: RevisionLookup, val summary: String)
+data class UndoPage(val lookup: PageLookup, val target: RevisionLookup, val summary: String, val base: RevisionBase? = null)
 sealed interface RevisionBase {
     data class Native(val id: UUID) : RevisionBase
     data class Compat(val id: Long) : RevisionBase
@@ -73,6 +75,7 @@ class PageApplicationService(
     transactions: PlatformTransactionManager,
 ) {
     private val wikitextDiff = WikitextDiff()
+    private val wikitextUndo = WikitextUndo()
     private val editTransaction = TransactionTemplate(transactions).apply { timeout = 8 }
 
     fun read(actor: PageActor, lookup: PageLookup): PageRead {
@@ -207,20 +210,36 @@ class PageApplicationService(
     @Transactional(timeout = 8)
     fun undo(actor: PageActor, requestId: UUID, command: UndoPage): Page {
         requireEdit(actor)
+        val observed = find(command.lookup).page ?: throw PageFailure(PageError.PAGE_NOT_FOUND)
+        if (actor == PageActor.ANONYMOUS && observed.sourceRestricted) throw PageFailure(PageError.REVISION_SOURCE_HIDDEN)
         val current = lockEditablePage(actor, command.lookup)
+        val baseMatches = when (val base = command.base) {
+            is RevisionBase.Native -> base.id == current.revisionId
+            is RevisionBase.Compat -> base.id == current.compatRevisionId
+            null -> observed.revisionId == current.revisionId
+        }
+        if (!baseMatches) throw PageFailure(PageError.EDIT_CONFLICT)
         val target = repository.findRevision(command.target) ?: throw PageFailure(PageError.REVISION_NOT_FOUND)
         if (actor == PageActor.ANONYMOUS && target.revision.sourceRestricted) {
             val error = if (target.page.id == current.id) PageError.REVISION_SOURCE_HIDDEN else PageError.REVISION_NOT_FOUND
             throw PageFailure(error)
         }
         if (target.page.id != current.id) throw PageFailure(PageError.UNDO_WRONG_PAGE)
-        if (target.revision.id != current.revisionId) throw PageFailure(PageError.EDIT_CONFLICT)
+        // A historical undo would copy the restricted head into a new public revision.
+        if (current.sourceRestricted && target.revision.id != current.revisionId) {
+            throw PageFailure(PageError.REVISION_SOURCE_HIDDEN)
+        }
         val parentId = target.revision.parentId ?: throw PageFailure(PageError.UNDO_NO_PARENT)
         val parent = repository.findRevision(RevisionLookup.Id(parentId))
             ?: throw PageFailure(PageError.REVISION_NOT_FOUND)
         // Undo creates a public revision, so it must never copy restricted source.
         if (parent.revision.sourceRestricted) throw PageFailure(PageError.REVISION_SOURCE_HIDDEN)
-        return repository.append(current, revision(actor, requestId, parent.source, command.summary))
+        val source = when (val result = wikitextUndo.apply(parent.source, target.source, current.source)) {
+            is UndoResult.Applied -> result.source
+            UndoResult.Conflict -> throw PageFailure(PageError.UNDO_CONFLICT)
+            UndoResult.TooLarge -> throw PageFailure(PageError.UNDO_TOO_LARGE)
+        }
+        return repository.append(current, revision(actor, requestId, source, command.summary))
     }
 
     private fun requireEdit(actor: PageActor) {

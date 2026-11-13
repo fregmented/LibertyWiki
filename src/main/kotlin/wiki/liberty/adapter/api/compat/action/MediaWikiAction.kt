@@ -114,7 +114,7 @@ class MediaWikiAction(private val pages: PageApplicationService, private val htt
         val create = params.get("createonly") != null
         val undo = params.get("undo")
         if (undo != null) {
-            params.only("title", "pageid", "undo", "text", "token", "summary", "nocreate")
+            params.only("title", "pageid", "undo", "text", "token", "summary", "nocreate", "baserevid")
         } else if (create) {
             params.only("title", "text", "token", "summary", "createonly")
         } else {
@@ -128,6 +128,7 @@ class MediaWikiAction(private val pages: PageApplicationService, private val htt
             pages.undo(actor, request.requestId(), UndoPage(
                 lookup(params.get("title"), params.get("pageid")),
                 RevisionLookup.CompatId(positiveInteger(undo, "undo")), summary,
+                params.get("baserevid")?.let { RevisionBase.Compat(positiveInteger(it, "baserevid")) },
             ))
         } else if (create) {
             pages.create(actor, request.requestId(), CreatePage(params.required("title"), 0, params.required("text"), summary))
@@ -341,6 +342,7 @@ class MediaWikiActionErrors {
             error("nosuchpageid", "There is no page with the specified ID.")
         }
         PageError.EDIT_CONFLICT -> error("editconflict", "Edit conflict.")
+        PageError.UNDO_CONFLICT, PageError.UNDO_TOO_LARGE -> error("undofailure", "The edit could not be undone due to conflicting intermediate edits.")
         PageError.UNDO_NO_PARENT -> error("nosuchrevid", "There is no revision with ID .")
         PageError.UNDO_WRONG_PAGE -> error("revwrongpage", request.getParameter("title")?.let {
             "r${request.getParameter("undo")} is not a revision of $it."

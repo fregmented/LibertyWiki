@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Development environment
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Nix development shell (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      # Install Playwright's browser outside Nix so host Linux libraries and
+      # the host dynamic linker are available to the browser process.
+      - name: Install browser and host dependencies
+        run: |
+          npm ci --prefix web
+          if [ "${{ runner.os }}" = Linux ]; then
+            npm exec --prefix web -- playwright install --with-deps chromium
+          else
+            npm exec --prefix web -- playwright install chromium
+          fi
+      - name: Verify build and runtime
+        run: nix develop --command bash scripts/verify-development-environment.sh

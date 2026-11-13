@@ -641,6 +641,32 @@ class PagePostgresTest {
     }
 
     @Test
+    fun `native undo rejects explicit null base without changing page or records`() {
+        val initial = http.nativeCreate("Undo-null-${UUID.randomUUID()}", source).json
+        val path = "$native/${initial["id"].asText()}"
+        val edited = http.postJson("$path/revisions", mapOf(
+            "baseRevisionId" to initial["currentRevisionId"].asText(), "source" to "Changed",
+        ), operatorToken)
+        assertThat(edited.status).isEqualTo(201)
+        val head = edited.json["currentRevisionId"].asText()
+        val body = mapOf("revisionId" to head, "baseRevisionId" to null)
+        val contract = spec.at("$undoOperation/requestBody/content/application~1json/schema")
+        validateSchema(contract, yaml.valueToTree(body - "baseRevisionId"))
+        val schema = yaml.createObjectNode()
+        schema.set<JsonNode>("components", spec["components"])
+        schema.set<JsonNode>("allOf", yaml.createArrayNode().add(contract))
+        assertThat(schemaFactory.getSchema(schema).validate(yaml.valueToTree(body))).isNotEmpty()
+        val before = rowCounts()
+
+        val response = http.postJson("$path/undos", body, operatorToken)
+        assertThat(response.status).isEqualTo(400)
+        assertThat(response.json["code"].asText()).isEqualTo("INVALID_BODY")
+        assertSchema("$undoOperation/responses/400", response.json)
+        assertThat(http.get(path, operatorToken).json["currentRevisionId"].asText()).isEqualTo(head)
+        assertThat(rowCounts()).isEqualTo(before)
+    }
+
+    @Test
     fun `both undo surfaces append restored source with one audit and outbox record`() {
         val title = "Undo-${UUID.randomUUID()}"
         val initial = http.nativeCreate(title, source).json
@@ -723,10 +749,10 @@ class PagePostgresTest {
         val before = rowCounts()
         rejected(foreignId, 404, "REVISION_NOT_FOUND")
         rejected(UUID.randomUUID().toString(), 404, "REVISION_NOT_FOUND")
-        rejected(first, 409, "EDIT_CONFLICT")
+        rejected(first, 409, "UNDO_NO_PARENT")
         assertThat(actionUndo(otherHead).json.at("/error/code").asText()).isEqualTo("revwrongpage")
         assertThat(actionUndo(Long.MAX_VALUE).json.at("/error/code").asText()).isEqualTo("nosuchrevid")
-        assertThat(actionUndo(firstCompat).json.at("/error/code").asText()).isEqualTo("editconflict")
+        assertThat(actionUndo(firstCompat).json.at("/error/code").asText()).isEqualTo("nosuchrevid")
         val badToken = http.actionUndo("title" to title, compatHead, operatorToken, token = "invalid")
         assertThat(badToken.json.at("/error/code").asText()).isEqualTo("badtoken")
 
@@ -742,6 +768,153 @@ class PagePostgresTest {
     }
 
     @Test
+    fun `historical undo preserves disjoint changes and rejects overlapping changes on both surfaces`() {
+        for (action in listOf(false, true)) {
+            val title = "Undo-history-${UUID.randomUUID()}"
+            val initial = http.nativeCreate(title, "one\ntwo\nthree\nfour\nfive\n").json
+            val path = "$native/${initial["id"].asText()}"
+            val target = http.postJson("$path/revisions", mapOf(
+                "baseRevisionId" to initial["currentRevisionId"].asText(),
+                "source" to "ONE\ntwo\nthree\nfour\nfive\n"), operatorToken).json
+            val compatTarget = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+            val latest = http.postJson("$path/revisions", mapOf(
+                "baseRevisionId" to target["currentRevisionId"].asText(),
+                "source" to "ONE\ntwo\nthree\nfour\nFIVE\n"), operatorToken).json
+            val compatLatest = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+            val before = rowCounts()
+            if (action) {
+                val response = http.actionUndo("title" to title, compatTarget, operatorToken, base = compatLatest)
+                assertThat(response.json.at("/edit/result").asText()).isEqualTo("Success")
+                assertThat(response.json.at("/edit/oldrevid").asLong()).isEqualTo(compatLatest)
+            } else {
+                val body = mapOf("revisionId" to target["currentRevisionId"].asText(),
+                    "baseRevisionId" to latest["currentRevisionId"].asText())
+                validateSchema(spec.at("$undoOperation/requestBody/content/application~1json/schema"), yaml.valueToTree(body))
+                val response = http.postJson("$path/undos", body, operatorToken)
+                assertThat(response.status).isEqualTo(201)
+                assertSchema("$undoOperation/responses/201", response.json)
+            }
+            val current = http.get(path, operatorToken).json
+            assertThat(current["source"].asText()).isEqualTo("one\ntwo\nthree\nfour\nFIVE\n")
+            assertThat(rowCounts()).containsExactly(before[0], before[1] + 1, before[2] + 1, before[3] + 1)
+            val revision = current["currentRevisionId"].asText()
+            val records = checkNotNull(jdbc.queryForObject("""
+                SELECT count(*) FROM wiki_revision r JOIN wiki_audit a ON a.revision_id = r.id
+                JOIN wiki_outbox o ON o.revision_id = r.id AND o.request_id = a.request_id
+                WHERE r.id = ? AND r.parent_revision_id = ?
+            """.trimIndent(), Long::class.javaObjectType, UUID.fromString(revision),
+                UUID.fromString(latest["currentRevisionId"].asText())))
+            assertThat(records).isEqualTo(1L)
+
+            val overlap = http.postJson("$path/revisions", mapOf("baseRevisionId" to revision,
+                "source" to "CONFLICT\ntwo\nthree\nfour\nFIVE\n"), operatorToken).json
+            val overlapCompat = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+            val unchanged = rowCounts()
+            val nativeConflict = http.postJson("$path/undos", mapOf("revisionId" to target["currentRevisionId"].asText()), operatorToken)
+            assertThat(nativeConflict.status).isEqualTo(409)
+            assertThat(nativeConflict.json["code"].asText()).isEqualTo("EDIT_CONFLICT")
+            assertSchema("$undoOperation/responses/409", nativeConflict.json)
+            val actionConflict = http.actionUndo("title" to title, compatTarget, operatorToken, base = overlapCompat)
+            assertThat(actionConflict.json.at("/error/code").asText()).isEqualTo("undofailure")
+            assertThat(http.get(path, operatorToken).json).isEqualTo(overlap)
+            assertThat(rowCounts()).isEqualTo(unchanged)
+        }
+    }
+
+    @Test
+    fun `native historical undo handles paragraph gaps and rejects adjacent edits`() {
+        for (adjacent in listOf(false, true)) {
+            val title = "Undo-boundary-${UUID.randomUUID()}"
+            val parent = if (adjacent) "old\nb" else "Intro\n\nOld para\n\nEnd"
+            val targetSource = if (adjacent) "new\nb" else "Intro\n\nNew para\n\nEnd"
+            val headSource = if (adjacent) "new\nB" else "Intro\n\nNew para\n\nEnd more"
+            val initial = http.nativeCreate(title, parent).json
+            val path = "$native/${initial["id"].asText()}"
+            val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to initial["currentRevisionId"].asText(),
+                "source" to targetSource), operatorToken).json
+            val head = http.postJson("$path/revisions", mapOf("baseRevisionId" to target["currentRevisionId"].asText(),
+                "source" to headSource), operatorToken).json
+            val before = rowCounts()
+            val result = http.postJson("$path/undos", mapOf("revisionId" to target["currentRevisionId"].asText()), operatorToken)
+            if (adjacent) {
+                assertThat(result.status).isEqualTo(409)
+                assertThat(result.json["code"].asText()).isEqualTo("EDIT_CONFLICT")
+                assertThat(http.get(path, operatorToken).json).isEqualTo(head)
+                assertThat(rowCounts()).isEqualTo(before)
+            } else {
+                assertThat(result.status).isEqualTo(201)
+                assertThat(result.json["source"].asText()).isEqualTo("Intro\n\nOld para\n\nEnd more")
+                assertThat(rowCounts()).containsExactly(before[0], before[1] + 1, before[2] + 1, before[3] + 1)
+            }
+        }
+    }
+
+    @Test
+    fun `ambiguous historical undo is rejected without writes on both surfaces`() {
+        val title = "Undo-ambiguous-${UUID.randomUUID()}"
+        val initial = http.nativeCreate(title, "old\nrepeat\nrepeat\nlast\n").json
+        val path = "$native/${initial["id"].asText()}"
+        val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to initial["currentRevisionId"].asText(),
+            "source" to "repeat\nrepeat\nrepeat\nlast\n"), operatorToken).json
+        val compatTarget = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+        val latest = http.postJson("$path/revisions", mapOf("baseRevisionId" to target["currentRevisionId"].asText(),
+            "source" to "repeat\nrepeat\nrepeat\nLAST\n"), operatorToken).json
+        val before = rowCounts()
+        val native = http.postJson("$path/undos", mapOf("revisionId" to target["currentRevisionId"].asText()), operatorToken)
+        assertThat(native.status).isEqualTo(409)
+        assertThat(native.json["code"].asText()).isEqualTo("EDIT_CONFLICT")
+        val action = http.actionUndo("title" to title, compatTarget, operatorToken)
+        assertThat(action.json.at("/error/code").asText()).isEqualTo("undofailure")
+        assertThat(http.get(path, operatorToken).json).isEqualTo(latest)
+        assertThat(rowCounts()).isEqualTo(before)
+    }
+
+    @Test
+    fun `historical undo processing limit fails without writes`() {
+        for (lineCount in listOf(1414, 4001)) {
+            val title = "Undo-limit-${UUID.randomUUID()}"
+            val lines = (1..lineCount).joinToString("\n") { "line $it" }
+            val initial = http.nativeCreate(title, "old\n$lines").json
+            val path = "$native/${initial["id"].asText()}"
+            val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to initial["currentRevisionId"].asText(),
+                "source" to "new\n$lines"), operatorToken).json
+            val compatTarget = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+            val head = http.postJson("$path/revisions", mapOf("baseRevisionId" to target["currentRevisionId"].asText(),
+                "source" to "new\n$lines\nlast"), operatorToken).json
+            val before = rowCounts()
+            val native = http.postJson("$path/undos", mapOf("revisionId" to target["currentRevisionId"].asText()), operatorToken)
+            assertThat(native.status).isEqualTo(422)
+            assertThat(native.json["code"].asText()).isEqualTo("UNDO_TOO_LARGE")
+            assertSchema("$undoOperation/responses/422", native.json)
+            assertThat(http.actionUndo("title" to title, compatTarget, operatorToken).json.at("/error/code").asText()).isEqualTo("undofailure")
+            assertThat(http.get(path, operatorToken).json).isEqualTo(head)
+            assertThat(rowCounts()).isEqualTo(before)
+            }
+    }
+
+    @Test
+    fun `historical undo rolls back revision and audit if outbox insert fails`() {
+        val title = "Undo-history-rollback-${UUID.randomUUID()}"
+        val initial = http.nativeCreate(title, "a\nb\nc\nd\ne\n").json
+        val path = "$native/${initial["id"].asText()}"
+        val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to initial["currentRevisionId"].asText(),
+            "source" to "A\nb\nc\nd\ne\n"), operatorToken).json
+        val compatTarget = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+        val latest = http.postJson("$path/revisions", mapOf("baseRevisionId" to target["currentRevisionId"].asText(),
+            "source" to "A\nb\nc\nd\nE\n"), operatorToken).json
+        val before = rowCounts()
+        jdbc.execute("ALTER TABLE wiki_outbox ADD CONSTRAINT contract_reject_history_undo CHECK (false) NOT VALID")
+        try {
+            assertThat(http.postJson("$path/undos", mapOf("revisionId" to target["currentRevisionId"].asText()), operatorToken).status).isEqualTo(500)
+            assertThat(http.actionUndo("title" to title, compatTarget, operatorToken).status).isEqualTo(500)
+        } finally {
+            jdbc.execute("ALTER TABLE wiki_outbox DROP CONSTRAINT contract_reject_history_undo")
+        }
+        assertThat(http.get(path, operatorToken).json).isEqualTo(latest)
+        assertThat(rowCounts()).isEqualTo(before)
+    }
+
+    @Test
     fun `native and action undo race a normal edit under the same page lock`() {
         val title = "Undo-race-${UUID.randomUUID()}"
         val initial = http.nativeCreate(title, source).json
@@ -752,8 +925,8 @@ class PagePostgresTest {
         val compatTarget = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
         val before = rowCounts()
         val calls = listOf(
-            { http.postJson("$path/undos", mapOf("revisionId" to target), operatorToken) },
-            { http.actionUndo("title" to title, compatTarget, operatorToken) },
+            { http.postJson("$path/undos", mapOf("revisionId" to target, "baseRevisionId" to target), operatorToken) },
+            { http.actionUndo("title" to title, compatTarget, operatorToken, base = compatTarget) },
             { http.restEdit(title, "Competing edit", compatTarget, auth = operatorToken) },
         )
         val barrier = CyclicBarrier(calls.size)

@@ -36,6 +36,7 @@ const errorMessages: Record<string, string> = {
   COMPARISON_TOO_LARGE: '비교할 리비전이 허용된 크기를 초과했습니다.',
   REVISION_NOT_FOUND: '리비전을 찾을 수 없습니다.',
   UNDO_NO_PARENT: '이전 리비전이 없어 되돌릴 수 없습니다.',
+  UNDO_TOO_LARGE: '자동 되돌리기의 처리 한도를 초과했습니다. 원문을 직접 편집해 주세요. 작성 중인 내용은 유지됩니다.',
   REVISION_SOURCE_HIDDEN: '이 리비전의 원문을 볼 권한이 없습니다.',
   PAGE_NOT_FOUND: '이 제목의 문서를 찾을 수 없습니다.',
 }
@@ -231,7 +232,7 @@ function App() {
     setError('')
     setStatus('편집을 되돌리는 중')
     try {
-      const result = await requestPage(`/api/v1/pages/${encodeURIComponent(page.id)}/undos`, token, { revisionId: id })
+      const result = await requestPage(`/api/v1/pages/${encodeURIComponent(page.id)}/undos`, token, { revisionId: id, baseRevisionId: page.currentRevisionId })
       const hasDraft = draft !== page.source || summary !== ''
       setPage(result)
       if (hasDraft) {
@@ -251,7 +252,7 @@ function App() {
       }
     } catch (failure) {
       if (failure instanceof RequestError && failure.code === 'EDIT_CONFLICT') {
-        setError('다른 편집이 먼저 저장되어 되돌릴 수 없습니다. 문서를 다시 조회하고 최신 이력을 확인하세요.')
+        setError('후속 편집과 겹치거나 적용 위치가 불명확하거나 최신 판이 바뀌어 되돌릴 수 없습니다. 문서를 다시 조회하고 최신 이력을 확인하세요.')
         clearHistory()
       } else {
         setError(failure instanceof Error ? failure.message : '요청을 처리할 수 없습니다.')
@@ -342,7 +343,7 @@ function App() {
                         <time dateTime={item.createdAt}>{item.createdAt}</time>{' · '}
                         <span>{item.summary}</span>{' '}
                         <button type="button" disabled={busy} onClick={() => void fetchRevision(item.id)}>리비전 {item.id} 보기</button>{' '}
-                        {item.id === page.currentRevisionId && item.parentRevisionId && <button type="button" disabled={busy || !!conflict} onClick={() => void undoRevision(item.id)}>리비전 {item.id} 되돌리기</button>}
+                        {item.parentRevisionId && <button type="button" disabled={busy || !!conflict} onClick={() => void undoRevision(item.id)}>리비전 {item.id} 되돌리기</button>}
                       </li>
                     ))}
                   </ul>

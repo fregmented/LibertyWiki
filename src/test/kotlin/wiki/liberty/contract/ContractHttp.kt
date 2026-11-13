@@ -84,9 +84,11 @@ internal class ContractHttp(private val base: String, private val scriptPath: St
 
     fun actionUndo(
         key: Pair<String, String>, revision: Long, auth: String? = null, summary: String? = null, token: String = csrfToken,
+        base: Long? = null,
     ): Result {
         val params = mutableMapOf("action" to "edit", key, "undo" to revision.toString(), "token" to token)
         if (summary != null) params["summary"] = summary
+        if (base != null) params["baserevid"] = base.toString()
         return send("$scriptPath/api.php", form(params), "application/x-www-form-urlencoded", auth)
     }
 
