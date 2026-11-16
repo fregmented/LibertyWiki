@@ -22,7 +22,7 @@ FR-EDIT-002,편집 충돌 방지,CORE,CAP-REVISION-COMMIT,commitRevision,NO,1.46
 FR-EDIT-003,편집 검증,CORE,CAP-REVISION-COMMIT,commitRevision,NO,1.46.2,내부 시험 정책과 입력 검증. 보호·차단·행위 필터는 후속 범위,PRODUCT_1_0
 FR-EDIT-004,리비전 이력,CORE,CAP-REVISION-HISTORY,getRevisions,NO,1.46.2,내부 시험용 최신순 페이지네이션. 확장된 메타데이터 및 권한은 후속 범위,PRODUCT_1_0
 FR-EDIT-005,리비전 차이,CORE,CAP-REVISION-COMPARE,compareRevisions,NO,1.46.2,같은 문서의 저장된 Wikitext 두 판을 비교하는 내부 시험 범위. compat_gap은 설계 §15 참조,PRODUCT_1_0
-FR-EDIT-006,되돌리기·취소,CORE,CAP-REVISION-UNDO|CAP-REVISION-ROLLBACK,undoRevision|rollbackRevision,NO,1.46.2,최신 편집 한 건 취소는 내부 시험 범위. 과거 편집·구간 취소와 롤백은 후속 범위. compat_gap은 설계 §15 참조,PRODUCT_1_0
+FR-EDIT-006,되돌리기·취소,CORE,CAP-REVISION-UNDO|CAP-REVISION-ROLLBACK,undoRevision|rollbackRevision,NO,1.46.2,후속 편집을 보존하는 단일 편집 취소는 내부 시험 범위. 구간 취소와 롤백은 후속 범위. compat_gap은 설계 §15 참조,PRODUCT_1_0
 FR-EDIT-007,리비전 비공개 처리,CORE,INVENTORY_PENDING,DESIGN_PENDING,NO,1.46.2,원본에 대응 API가 없으면 UI_ONLY; Native API는 필수,PRODUCT_1_0
 FR-EDIT-008,다중 콘텐츠 슬롯,CORE,INVENTORY_PENDING,DESIGN_PENDING,NO,1.46.2,원본에 대응 API가 없으면 UI_ONLY; Native API는 필수,PRODUCT_1_0
 FR-EDIT-009,자동저장·임시 초안,CORE,INVENTORY_PENDING,DESIGN_PENDING,NO,1.46.2,원본에 대응 API가 없으면 UI_ONLY; Native API는 필수,PRODUCT_1_0

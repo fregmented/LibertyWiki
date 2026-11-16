@@ -2,6 +2,8 @@
 package wiki.liberty.adapter.api.nativeapi
 
 import com.fasterxml.jackson.annotation.JsonInclude
+import com.fasterxml.jackson.annotation.JsonSetter
+import com.fasterxml.jackson.annotation.Nulls
 import jakarta.servlet.http.HttpServletRequest
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -34,7 +36,11 @@ import java.util.UUID
 
 data class NativeCreatePage(val title: String, val namespaceId: Int, val source: String, val summary: String = "")
 data class NativeEditPage(val baseRevisionId: String, val source: String, val summary: String = "")
-data class NativeUndoPage(val revisionId: String, val summary: String = "")
+data class NativeUndoPage(
+    val revisionId: String,
+    val summary: String = "",
+    @param:JsonSetter(nulls = Nulls.FAIL) val baseRevisionId: String? = null,
+)
 
 data class NativeSourcePage(
     val id: UUID,
@@ -136,7 +142,7 @@ class NativePages(private val pages: PageApplicationService, private val http: P
         pages.requireRead(actor)
         val command = UndoPage(
             PageLookup.Id(parseId(pageId)), RevisionLookup.Id(parseId(body.revisionId, NativeIdKind.REVISION)),
-            body.summary,
+            body.summary, body.baseRevisionId?.let { RevisionBase.Native(parseId(it, NativeIdKind.BASE_REVISION)) },
         )
         return pages.undo(actor, request.requestId(), command).native()
     }
@@ -243,7 +249,7 @@ class NativePageErrors(private val http: PageHttp) {
     fun domain(failure: PageFailure, request: HttpServletRequest): ResponseEntity<NativeError> {
         val status = when (failure.error) {
             PageError.FORBIDDEN, PageError.REVISION_SOURCE_HIDDEN -> HttpStatus.FORBIDDEN
-            PageError.EXISTS, PageError.EDIT_CONFLICT, PageError.UNDO_NO_PARENT -> HttpStatus.CONFLICT
+            PageError.EXISTS, PageError.EDIT_CONFLICT, PageError.UNDO_CONFLICT, PageError.UNDO_NO_PARENT -> HttpStatus.CONFLICT
             PageError.PAGE_NOT_FOUND, PageError.REVISION_NOT_FOUND, PageError.UNDO_WRONG_PAGE -> HttpStatus.NOT_FOUND
             PageError.INVALID_CURSOR, PageError.INVALID_LIMIT, PageError.REVISION_PAGE_MISMATCH -> HttpStatus.BAD_REQUEST
             else -> HttpStatus.UNPROCESSABLE_ENTITY
@@ -251,8 +257,9 @@ class NativePageErrors(private val http: PageHttp) {
         val message = when (failure.error) {
             PageError.FORBIDDEN -> "The page operation is forbidden."
             PageError.EXISTS -> "A page with this title already exists."
-            PageError.EDIT_CONFLICT -> "The page has changed since the base revision."
+            PageError.EDIT_CONFLICT, PageError.UNDO_CONFLICT -> "The page has changed since the base revision."
             PageError.UNDO_NO_PARENT -> "The first revision cannot be undone."
+            PageError.UNDO_TOO_LARGE -> "The undo exceeds the processing limit."
             PageError.PAGE_NOT_FOUND -> "Page not found."
             PageError.REVISION_NOT_FOUND, PageError.UNDO_WRONG_PAGE -> "Revision not found."
             PageError.REVISION_SOURCE_HIDDEN -> "The revision source is restricted."
@@ -265,7 +272,11 @@ class NativePageErrors(private val http: PageHttp) {
             PageError.INVALID_SOURCE -> "Source must be valid Unicode and at most 1 MiB in UTF-8."
             PageError.INVALID_SUMMARY -> "Summary must be valid Unicode and at most 500 characters."
         }
-        val code = if (failure.error == PageError.UNDO_WRONG_PAGE) PageError.REVISION_NOT_FOUND else failure.error
+        val code = when (failure.error) {
+            PageError.UNDO_WRONG_PAGE -> PageError.REVISION_NOT_FOUND
+            PageError.UNDO_CONFLICT -> PageError.EDIT_CONFLICT
+            else -> failure.error
+        }
         return error(status, code.name, message, request)
     }
 

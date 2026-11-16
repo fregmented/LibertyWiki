@@ -152,6 +152,89 @@ class RevisionVisibilityTest {
         assertThat(http.get("/api/v1/revisions/$head").status).isEqualTo(403)
     }
 
+    @Test
+    fun `anonymous historical undo rejects restricted target or parent without writes`() {
+        val http = ContractHttp("http://127.0.0.1:$port")
+        val title = "Undo-hidden-target-${UUID.randomUUID()}"
+        val initial = http.nativeCreate(title, "one\ntwo\nthree\nfour\nfive").json
+        val path = "/api/v1/pages/${initial["id"].asText()}"
+        val parent = initial["currentRevisionId"].asText()
+        val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to parent,
+            "source" to "ONE\ntwo\nthree\nfour\nfive"), operatorToken).json
+        val targetId = target["currentRevisionId"].asText()
+        val compatTarget = http.restRead(title).json.at("/latest/id").asLong()
+        val head = http.postJson("$path/revisions", mapOf("baseRevisionId" to targetId,
+            "source" to "ONE\ntwo\nthree\nfour\nFIVE"), operatorToken).json
+        for (restricted in listOf(parent, targetId)) {
+            jdbc.update("INSERT INTO wiki_revision_source_restriction (revision_id) VALUES (?)", UUID.fromString(restricted))
+            val before = counts()
+            val native = http.postJson("$path/undos", mapOf("revisionId" to targetId))
+            assertThat(native.status).isEqualTo(403)
+            assertThat(native.json["code"].asText()).isEqualTo("REVISION_SOURCE_HIDDEN")
+            val action = http.actionUndo("title" to title, compatTarget)
+            assertThat(action.json.at("/error/code").asText()).isEqualTo("missingcontent")
+            assertThat(counts()).isEqualTo(before)
+            assertThat(http.get(path, operatorToken).json).isEqualTo(head)
+            jdbc.update("DELETE FROM wiki_revision_source_restriction WHERE revision_id = ?", UUID.fromString(restricted))
+        }
+    }
+
+    @Test
+    fun `historical undo cannot publish restricted current source even for operator`() {
+        val http = ContractHttp("http://127.0.0.1:$port")
+        val title = "Undo-hidden-history-${UUID.randomUUID()}"
+        val page = http.nativeCreate(title, "one\ntwo\nthree\nfour\nfive\n").json
+        val path = "/api/v1/pages/${page["id"].asText()}"
+        val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to page["currentRevisionId"].asText(),
+            "source" to "ONE\ntwo\nthree\nfour\nfive\n"), operatorToken).json
+        val targetId = target["currentRevisionId"].asText()
+        val compatTarget = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+        val head = http.postJson("$path/revisions", mapOf("baseRevisionId" to targetId,
+            "source" to "ONE\ntwo\nthree\nfour\nSECRET\n"), operatorToken).json
+        val headId = head["currentRevisionId"].asText()
+        val compatHead = http.restRead(title, operatorToken).json.at("/latest/id").asLong()
+        jdbc.update("INSERT INTO wiki_revision_source_restriction (revision_id) VALUES (?)", UUID.fromString(headId))
+        val before = counts()
+        for (explicitBase in listOf(false, true)) {
+            val body = mutableMapOf("revisionId" to targetId)
+            if (explicitBase) body["baseRevisionId"] = headId
+            val native = http.postJson("$path/undos", body, operatorToken)
+            assertThat(native.status).isEqualTo(403)
+            assertThat(native.json["code"].asText()).isEqualTo("REVISION_SOURCE_HIDDEN")
+            val action = http.actionUndo("title" to title, compatTarget, operatorToken,
+                base = if (explicitBase) compatHead else null)
+            assertThat(action.json.at("/error/code").asText()).isEqualTo("missingcontent")
+            assertThat(listOf(native.json.toString(), action.json.toString())).noneMatch { it.contains("SECRET") }
+            assertThat(counts()).isEqualTo(before)
+            assertThat(http.get(path, operatorToken).json).isEqualTo(head)
+        }
+    }
+
+    @Test
+    fun `historical undo does not disclose a restricted current revision on stale base`() {
+        val http = ContractHttp("http://127.0.0.1:$port")
+        val title = "Undo-hidden-current-${UUID.randomUUID()}"
+        val page = http.nativeCreate(title, "one\ntwo\nthree\nfour\nfive\n").json
+        val path = "/api/v1/pages/${page["id"].asText()}"
+        val target = http.postJson("$path/revisions", mapOf("baseRevisionId" to page["currentRevisionId"].asText(),
+            "source" to "ONE\ntwo\nthree\nfour\nfive\n"), operatorToken).json
+        val compatTarget = http.restRead(title).json.at("/latest/id").asLong()
+        val head = http.postJson("$path/revisions", mapOf("baseRevisionId" to target["currentRevisionId"].asText(),
+            "source" to "ONE\ntwo\nthree\nfour\nSECRET\n"), operatorToken).json
+        val headId = head["currentRevisionId"].asText()
+        val compatHead = http.restRead(title).json.at("/latest/id").asLong()
+        jdbc.update("INSERT INTO wiki_revision_source_restriction (revision_id) VALUES (?)", UUID.fromString(headId))
+        val before = counts()
+        val native = http.postJson("$path/undos", mapOf("revisionId" to target["currentRevisionId"].asText(),
+            "baseRevisionId" to target["currentRevisionId"].asText()), operatorToken)
+        assertThat(native.status).isEqualTo(409)
+        assertThat(native.json["code"].asText()).isEqualTo("EDIT_CONFLICT")
+        assertThat(native.json.toString()).doesNotContain(headId, "SECRET")
+        val action = http.actionUndo("title" to title, compatTarget, base = compatTarget)
+        assertThat(action.json.toString()).doesNotContain(compatHead.toString(), "SECRET")
+        assertThat(counts()).isEqualTo(before)
+    }
+
     private fun counts() = listOf("wiki_page", "wiki_revision", "wiki_audit", "wiki_outbox", "wiki_revision_source_restriction")
         .map { jdbc.queryForObject("SELECT count(*) FROM $it", Long::class.javaObjectType) }
 

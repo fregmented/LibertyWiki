@@ -68,6 +68,104 @@ class MediaWikiPageContractTest {
             .isEqualTo(observeUndo(baseline, baselineUrl, title))
     }
 
+    @Test
+    fun `compares historical undo and overlapping changes against MediaWiki 1_46_2`() {
+        val local = ContractHttp("http://127.0.0.1:$port")
+        val title = "Undo history ${UUID.randomUUID()}"
+        assertThat(observeHistoricalUndo(local, title)).isEqualTo(observeHistoricalUndo(baseline(), title))
+    }
+
+    private fun observeHistoricalUndo(http: ContractHttp, title: String): Map<String, String> {
+        fun currentSource(pageTitle: String) = http.actionRead("titles" to pageTitle).json
+            .at("/query/pages/0/revisions/0/slots/main/content").asText()
+        val initialSource = "one\ntwo\nthree\nfour\nfive"
+        val targetSource = "ONE\ntwo\nthree\nfour\nfive"
+        val latestSource = "ONE\ntwo\nthree\nfour\nFIVE"
+        val first = http.actionCreate(title, initialSource).json.at("/edit/newrevid").asLong()
+        assertThat(currentSource(title)).isEqualTo(initialSource)
+        val target = http.actionEdit("title" to title, targetSource, first).json.at("/edit/newrevid").asLong()
+        assertThat(currentSource(title)).isEqualTo(targetSource)
+        val latest = http.actionEdit("title" to title, latestSource, target).json.at("/edit/newrevid").asLong()
+        assertThat(currentSource(title)).isEqualTo(latestSource)
+        assertThat(listOf(first, target, latest)).allMatch { it > 0 }
+        val success = http.actionUndo("title" to title, target)
+        assertThat(success.json.at("/edit/result").asText()).isEqualTo("Success")
+        val restored = currentSource(title)
+        assertThat(restored).isEqualTo("one\ntwo\nthree\nfour\nFIVE")
+        val conflictTitle = "Overlap $title"
+        val c1 = http.actionCreate(conflictTitle, "one\ntwo\nthree").json.at("/edit/newrevid").asLong()
+        assertThat(currentSource(conflictTitle)).isEqualTo("one\ntwo\nthree")
+        val c2 = http.actionEdit("title" to conflictTitle, "ONE\ntwo\nthree", c1).json.at("/edit/newrevid").asLong()
+        assertThat(currentSource(conflictTitle)).isEqualTo("ONE\ntwo\nthree")
+        val c3 = http.actionEdit("title" to conflictTitle, "OTHER\ntwo\nthree", c2).json.at("/edit/newrevid").asLong()
+        assertThat(currentSource(conflictTitle)).isEqualTo("OTHER\ntwo\nthree")
+        val conflict = http.actionUndo("title" to conflictTitle, c2)
+        assertThat(http.actionRead("titles" to conflictTitle).json.at("/query/pages/0/revisions/0/revid").asLong()).isEqualTo(c3)
+        return mapOf("result" to success.json.at("/edit/result").asText(), "source" to restored,
+            "conflict" to conflict.json.at("/error/code").asText())
+    }
+
+    @Test
+    fun `compares paragraph and adjacent historical undo against MediaWiki 1_46_2`() {
+        val title = "Undo boundaries ${UUID.randomUUID()}"
+        fun observe(http: ContractHttp): Map<String, String> {
+            fun scenario(name: String, firstSource: String, targetSource: String, headSource: String): Pair<String, String> {
+                val page = "$name $title"
+                fun source() = http.actionRead("titles" to page).json.at("/query/pages/0/revisions/0/slots/main/content").asText()
+                val first = http.actionCreate(page, firstSource).json.at("/edit/newrevid").asLong()
+                assertThat(source()).isEqualTo(firstSource)
+                val target = http.actionEdit("title" to page, targetSource, first).json.at("/edit/newrevid").asLong()
+                assertThat(source()).isEqualTo(targetSource)
+                val head = http.actionEdit("title" to page, headSource, target).json.at("/edit/newrevid").asLong()
+                assertThat(source()).isEqualTo(headSource)
+                assertThat(listOf(first, target, head)).allMatch { it > 0 }
+                val undo = http.actionUndo("title" to page, target).json
+                return (if (undo.has("edit")) undo.at("/edit/result").asText() else undo.at("/error/code").asText()) to source()
+            }
+            val paragraph = scenario("Paragraph", "Intro\n\nOld para\n\nEnd", "Intro\n\nNew para\n\nEnd", "Intro\n\nNew para\n\nEnd more")
+            val adjacent = scenario("Adjacent", "old\nb", "new\nb", "new\nB")
+            return mapOf("paragraphResult" to paragraph.first, "paragraphSource" to paragraph.second,
+                "adjacentResult" to adjacent.first, "adjacentSource" to adjacent.second)
+        }
+        val expected = observe(baseline())
+        assertThat(expected).containsEntry("paragraphResult", "Success").containsEntry("paragraphSource", "Intro\n\nOld para\n\nEnd more")
+            .containsEntry("adjacentResult", "undofailure").containsEntry("adjacentSource", "new\nB")
+        assertThat(observe(ContractHttp("http://127.0.0.1:$port"))).isEqualTo(expected)
+    }
+
+    @Test
+    fun `documents conservative ambiguity gap for paragraph insertion and deletion`() {
+        val short = "Intro\n\nEnd\nseparator\nlast"
+        val long = "Intro\n\nNew\n\nEnd\nseparator\nlast"
+        val suffix = UUID.randomUUID().toString()
+        fun observe(http: ContractHttp, expectedSuccess: Boolean) {
+            for ((label, sources) in listOf("Insert" to (short to long), "Delete" to (long to short))) {
+                val (parent, targetSource) = sources
+                val title = "Undo ambiguity $label $suffix"
+                val headSource = "$targetSource changed"
+                fun source() = http.actionRead("titles" to title).json.at("/query/pages/0/revisions/0/slots/main/content").asText()
+                val first = http.actionCreate(title, parent).json.at("/edit/newrevid").asLong()
+                assertThat(source()).isEqualTo(parent)
+                val target = http.actionEdit("title" to title, targetSource, first).json.at("/edit/newrevid").asLong()
+                assertThat(source()).isEqualTo(targetSource)
+                val head = http.actionEdit("title" to title, headSource, target).json.at("/edit/newrevid").asLong()
+                assertThat(source()).isEqualTo(headSource)
+                assertThat(listOf(first, target, head)).allMatch { it > 0 }
+                val undo = http.actionUndo("title" to title, target).json
+                if (expectedSuccess) {
+                    assertThat(undo.at("/edit/result").asText()).isEqualTo("Success")
+                    assertThat(source()).isEqualTo("$parent changed")
+                } else {
+                    assertThat(undo.at("/error/code").asText()).isEqualTo("undofailure")
+                    assertThat(source()).isEqualTo(headSource)
+                    assertThat(http.actionRead("titles" to title).json.at("/query/pages/0/revisions/0/revid").asLong()).isEqualTo(head)
+                }
+            }
+        }
+        observe(baseline(), expectedSuccess = true)
+        observe(ContractHttp("http://127.0.0.1:$port"), expectedSuccess = false)
+    }
+
     private fun observeUndo(http: ContractHttp, apiUrl: String, title: String): Map<String, Any> {
         val first = http.actionCreate(title, "Original source").json.at("/edit/newrevid").asLong()
         val second = http.actionEdit("title" to title, "Changed source", first).json.at("/edit/newrevid").asLong()

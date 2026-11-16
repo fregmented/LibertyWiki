@@ -74,7 +74,7 @@ status: INCOMPLETE
 
 `CAP-REVISION-COMPARE`의 두 API 계열 매핑과 Wikidiff2 기준 프로파일은 [저장된 리비전 비교 계약](15_PAGE_SOURCE_SLICE.md#저장된-리비전-비교)에 명시합니다.
 
-`CAP-REVISION-UNDO`의 Native와 Action 매핑, 독립 MediaWiki REST 경로의 적용 여부와 부작용은 [최신 편집 한 건 취소 계약](15_PAGE_SOURCE_SLICE.md#최신-편집-한-건-취소)에 명시합니다.
+`CAP-REVISION-UNDO`의 Native와 Action 매핑, 독립 MediaWiki REST 경로의 적용 여부와 부작용은 [후속 편집을 보존하는 단일 편집 취소 계약](15_PAGE_SOURCE_SLICE.md#후속-편집을-보존하는-단일-편집-취소)에 명시합니다.
 
 각 operation의 metadata: `capabilityId`, `upstreamVersionIntroduced`, `upstreamVersionChanged`, `mwCompatAction`, `mwCompatRest`, `nativeOperationIds`, `permissionPolicyId`, `sideEffectIds`, `testIds`, `extensionId`, `status`, `owner`, `fixtureVersion`, `releaseId`.
 

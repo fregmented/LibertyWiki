@@ -28,35 +28,34 @@ sealed interface DiffResult {
 
 /** A bounded, source-preserving line and Unicode code point comparison. */
 class WikitextDiff(private val limits: WikitextDiffLimits = WikitextDiffLimits()) {
-    private class LimitExceeded : RuntimeException()
     private class Budget(private val limit: Long) {
         private var used = 0L
         private val startedAt = System.nanoTime()
         private var checks = 0
 
         fun spend(amount: Long) {
-            if (amount < 0 || amount > limit - used) throw LimitExceeded()
+            if (amount < 0 || amount > limit - used) throw WikitextLimitExceeded()
             used += amount
             if (++checks % 1024 == 0) checkTime()
         }
 
         fun checkTime() {
-            if (System.nanoTime() - startedAt > 500_000_000L) throw LimitExceeded()
+            if (System.nanoTime() - startedAt > 500_000_000L) throw WikitextLimitExceeded()
         }
     }
 
     fun compare(from: String, to: String): DiffResult {
         return try {
             // UTF-8 encoding allocates at most three bytes per UTF-16 code unit.
-            if (from.length.toLong() + to.length > limits.maxInputBytes) throw LimitExceeded()
-            if (from.toByteArray(Charsets.UTF_8).size.toLong() + to.toByteArray(Charsets.UTF_8).size > limits.maxInputBytes) throw LimitExceeded()
+            if (from.length.toLong() + to.length > limits.maxInputBytes) throw WikitextLimitExceeded()
+            if (from.toByteArray(Charsets.UTF_8).size.toLong() + to.toByteArray(Charsets.UTF_8).size > limits.maxInputBytes) throw WikitextLimitExceeded()
 
             val budget = Budget(limits.maxWork)
             val old = splitLines(from)
             val new = splitLines(to)
-            if (old.size.toLong() + new.size > limits.maxInputLines) throw LimitExceeded()
+            if (old.size.toLong() + new.size > limits.maxInputLines) throw WikitextLimitExceeded()
             if (from == to) {
-                if (limits.maxOutputBytes < 2) throw LimitExceeded()
+                if (limits.maxOutputBytes < 2) throw WikitextLimitExceeded()
                 return DiffResult.Success(emptyList())
             }
             val steps = sequence(old, new, budget) { a, b ->
@@ -95,24 +94,24 @@ class WikitextDiff(private val limits: WikitextDiffLimits = WikitextDiffLimits()
                         rows.add(DiffLine(DiffLineType.ADDED, null, b + 1, emptyList(), marked(new[b])))
                     }
                 }
-                if (rows.size > limits.maxOutputRows) throw LimitExceeded()
+                if (rows.size > limits.maxOutputRows) throw WikitextLimitExceeded()
             }
             // Conservative bound for JSON escaping plus per-row and per-fragment metadata.
             var size = 2L
             for (row in rows) {
                 size += 128
                 for (part in row.from + row.to) size += 40L + 6L * part.text.length
-                if (size > limits.maxOutputBytes) throw LimitExceeded()
+                if (size > limits.maxOutputBytes) throw WikitextLimitExceeded()
             }
             budget.checkTime()
             DiffResult.Success(rows)
-        } catch (_: LimitExceeded) {
+        } catch (_: WikitextLimitExceeded) {
             DiffResult.TooLarge
         }
     }
 
     private fun splitLines(source: String): List<String> {
-        if (source.count { it == '\n' }.toLong() + 1 > limits.maxInputLines) throw LimitExceeded()
+        if (source.count { it == '\n' }.toLong() + 1 > limits.maxInputLines) throw WikitextLimitExceeded()
         return source.split('\n')
     }
     private fun plain(s: String) = listOf(DiffFragment(s, false))
@@ -122,7 +121,7 @@ class WikitextDiff(private val limits: WikitextDiffLimits = WikitextDiffLimits()
     private fun <T> sequence(a: List<T>, b: List<T>, budget: Budget, equal: (T, T) -> Boolean): List<Step> {
         val cells = (a.size.toLong() + 1) * (b.size.toLong() + 1)
         budget.spend(cells)
-        if (cells > Int.MAX_VALUE) throw LimitExceeded()
+        if (cells > Int.MAX_VALUE) throw WikitextLimitExceeded()
         val width = b.size + 1
         val table = IntArray(cells.toInt())
         for (i in a.indices.reversed()) {
