@@ -69,7 +69,7 @@ npm exec --prefix web -- playwright install chromium
 nix develop --command bash scripts/verify-development-environment.sh
 ```
 
-Linux에서는 Playwright의 호스트 라이브러리도 필요합니다(`playwright install --with-deps chromium`). MediaWiki 차등 시험은 별도 기준 서버의 `WIKI_MW_BASE_URL`을 지정했을 때 추가로 실행합니다.
+Linux에서는 Playwright의 호스트 라이브러리도 필요합니다(`playwright install --with-deps chromium`). [개발 환경 CI](.github/workflows/development-environment.yml)는 같은 스크립트를 Linux·macOS의 ARM64·x86-64 네이티브 러너에서 실행합니다. MediaWiki 차등 시험은 별도 기준 서버의 `WIKI_MW_BASE_URL`을 지정했을 때 추가로 실행합니다.
 
 개발 도구는 애플리케이션 의존성이나 배포 이미지에 추가하지 않습니다. Nixpkgs는 MIT, Node.js는 MIT, PostgreSQL은 PostgreSQL License이며 JDK는 배포물의 GPLv2 및 예외·제3자 고지를 따릅니다. 도구를 재배포할 때는 고정된 실제 배포물의 라이선스와 공급망 검토가 별도로 필요합니다.
 
